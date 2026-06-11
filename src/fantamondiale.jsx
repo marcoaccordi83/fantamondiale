@@ -102,10 +102,27 @@ function AuthShell({ children, title, subtitle }) {
 }
 
 function InputField({ label, type = "text", value, onChange, placeholder, autoCapitalize }) {
+  const [showPwd, setShowPwd] = useState(false);
+  const isPassword = type === "password";
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={{ fontSize: 12, color: "#6dab80", display: "block", marginBottom: 6, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" }}>{label}</label>
-      <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder} autoCapitalize={autoCapitalize || "none"} style={S.input} />
+      <div style={{ position: "relative" }}>
+        <input
+          type={isPassword ? (showPwd ? "text" : "password") : type}
+          value={value} onChange={e => onChange(e.target.value)}
+          placeholder={placeholder} autoCapitalize={autoCapitalize || "none"}
+          style={{ ...S.input, paddingRight: isPassword ? 44 : 14 }}
+        />
+        {isPassword && (
+          <button onClick={() => setShowPwd(v => !v)} type="button" style={{
+            position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)",
+            background: "none", border: "none", cursor: "pointer", color: "#557a62", fontSize: 16, padding: 0,
+          }}>
+            {showPwd ? "🙈" : "👁️"}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -1053,7 +1070,7 @@ function TopBar({ pts, user, lega, onLogout, onCambiaLega }) {
 }
 
 // ─── NAV BAR ─────────────────────────────────────────────────────────────────
-function NavBar({ tab, setTab, isAdmin }) {
+function NavBar({ tab, setTab, isAdmin, onCambiaLega }) {
   const tabs = [
     { id: "classifica", label: "Classifica", emoji: "🏅" },
     { id: "pretorneo", label: "Pre-Torneo", emoji: "🎯" },
@@ -1069,6 +1086,9 @@ function NavBar({ tab, setTab, isAdmin }) {
           <div style={{ fontSize: 15, marginBottom: 2 }}>{t.emoji}</div>{t.label}
         </button>
       ))}
+      <button onClick={onCambiaLega} style={{ flex: "0 0 auto", padding: "10px 10px 9px", background: "transparent", border: "none", cursor: "pointer", fontSize: 10, color: "#3a5c46", borderBottom: "2px solid transparent", whiteSpace: "nowrap" }}>
+        <div style={{ fontSize: 15, marginBottom: 2 }}>🔀</div>Leghe
+      </button>
     </div>
   );
 }
@@ -1090,7 +1110,7 @@ function MainApp({ user, lega, onLogout, onCambiaLega }) {
   return (
     <div style={{ maxWidth: 400, margin: "0 auto", background: "#0d1f16", minHeight: "100vh", fontFamily: "system-ui, sans-serif", color: "#e8f5e3" }}>
       <TopBar pts={myPts} user={user} lega={lega} onLogout={onLogout} onCambiaLega={onCambiaLega} />
-      <NavBar tab={tab} setTab={setTab} isAdmin={isAdmin} />
+      <NavBar tab={tab} setTab={setTab} isAdmin={isAdmin} onCambiaLega={onCambiaLega} />
       {tab === "classifica" && <Classifica lega={lega} user={user} />}
       {tab === "pretorneo" && <PreTorneo user={user} lega={lega} />}
       {tab === "partite" && <Partite user={user} lega={lega} />}
