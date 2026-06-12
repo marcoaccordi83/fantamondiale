@@ -227,7 +227,7 @@ function LeagueHub({ user, onJoinLeague, onCreateLeague, onLogout }) {
       if (!gia) {
         const { count } = await supabase.from("partecipanti").select("*", { count: "exact", head: true }).eq("lega_id", lega.id);
         if (lega.max_partecipanti && count >= lega.max_partecipanti) { setError("Lega al completo."); return; }
-        await supabase.from("partecipanti").insert({ lega_id: lega.id, user_id: user.id, punti: 0 });
+        await supabase.from("partecipanti").insert({ lega_id: lega.id, user_id: user.id, punti: 100 });
       }
       onJoinLeague({ id: lega.id, nome: lega.nome, codice: lega.codice });
     } catch { setError("Errore di connessione."); }
@@ -241,7 +241,7 @@ function LeagueHub({ user, onJoinLeague, onCreateLeague, onLogout }) {
     try {
       const codiceGen = generateCode();
       const { data: lega } = await supabase.from("leghe").insert({ nome: nomeLega, codice: codiceGen, creatore_id: user.id, max_partecipanti: maxP === "∞" ? null : parseInt(maxP) }).select().single();
-      await supabase.from("partecipanti").insert({ lega_id: lega.id, user_id: user.id, punti: 0 });
+      await supabase.from("partecipanti").insert({ lega_id: lega.id, user_id: user.id, punti: 100 });
       setCreated({ id: lega.id, codice: codiceGen, nome: nomeLega });
     } catch { setError("Errore di connessione."); }
     finally { setLoading(false); }
