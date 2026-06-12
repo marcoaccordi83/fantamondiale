@@ -924,6 +924,11 @@ function AdminPanel({ lega, user }) {
   const [partite, setPartite] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [vista, setVista] = useState("gironi");
+
+  // Campi risultato
   const [scoreH, setScoreH] = useState("");
   const [scoreA, setScoreA] = useState("");
   const [scoreHet, setScoreHet] = useState("");
@@ -932,9 +937,14 @@ function AdminPanel({ lega, user }) {
   const [scoreApen, setScoreApen] = useState("");
   const [hasET, setHasET] = useState(false);
   const [hasPen, setHasPen] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState("");
-  const [vista, setVista] = useState("gironi");
+
+  // Campi extra
+  const [marcatore, setMarcatore] = useState("");
+  const [cartelliniTot, setCartelliniTot] = useState("");
+  const [primoGolFascia, setPrimoGolFascia] = useState(""); // "0-30","31-60","61-90","0-0"
+
+  // Migliori terze
+  const [terze, setTerze] = useState({});
 
   const loadPartite = () => {
     supabase.from("partite").select("*").eq("lega_id", lega.id).order("kickoff", { ascending: true })
@@ -949,15 +959,17 @@ function AdminPanel({ lega, user }) {
     setScoreA(p.score_away_90 !== null ? String(p.score_away_90) : "");
     setScoreHet(""); setScoreAet(""); setScoreHpen(""); setScoreApen("");
     setHasET(false); setHasPen(false);
+    setMarcatore(""); setCartelliniTot(""); setPrimoGolFascia("");
     setMsg("");
   };
 
-  const calcScommesse = async (partitaId, h, a, winner, isPlayoff) => {
+  const calcScommesse = async (partitaId, h, a, winner, isPlayoff, extra) => {
     const { data: scommesse } = await supabase.from("scommesse").select("*").eq("partita_id", partitaId);
     if (!scommesse || scommesse.length === 0) return;
     for (const s of scommesse) {
       let esito = "ko"; let puntiAssegnati = s.penalita;
       const totGol = h + a;
+
       if (s.tipo === "1x2") {
         const ris = h > a ? "home" : h < a ? "away" : "x";
         if (s.scelta === ris) { esito = "ok"; puntiAssegnati = s.punti_potenziali; }
@@ -965,23 +977,37 @@ function AdminPanel({ lega, user }) {
         const ris = totGol > 2 ? "over" : "under";
         if (s.scelta === ris) { esito = "ok"; puntiAssegnati = s.punti_potenziali; }
       } else if (s.tipo === "quando") {
-        if (h === 0 && a === 0 && s.scelta === "0-0") { esito = "ok"; puntiAssegnati = s.punti_potenziali; }
-        else if (s.scelta !== "0-0") { esito = "wait"; puntiAssegnati = null; }
+        if (extra.primoGolFascia) {
+          if (s.scelta === extra.primoGolFascia) { esito = "ok"; puntiAssegnati = s.punti_potenziali; }
+          else { esito = "ko"; puntiAssegnati = s.penalita; }
+        } else { esito = "wait"; puntiAssegnati = null; }
       } else if (s.tipo === "cleansheet") {
         if (s.scelta === "home" && a === 0) { esito = "ok"; puntiAssegnati = s.punti_potenziali; }
         else if (s.scelta === "away" && h === 0) { esito = "ok"; puntiAssegnati = s.punti_potenziali; }
         else if (s.scelta === "no" && h > 0 && a > 0) { esito = "ok"; puntiAssegnati = s.punti_potenziali; }
       } else if (s.tipo === "cartellini") {
-        esito = "wait"; puntiAssegnati = null;
+        if (extra.cartelliniTot !== "") {
+          const tot = parseInt(extra.cartelliniTot);
+          const ris = tot > 3 ? "over" : "under";
+          if (s.scelta === ris) { esito = "ok"; puntiAssegnati = s.punti_potenziali; }
+          else { esito = "ko"; puntiAssegnati = s.penalita; }
+        } else { esito = "wait"; puntiAssegnati = null; }
       } else if (s.tipo === "risultato") {
         const ris = `${h}-${a}`;
         if (s.scelta === ris) { esito = "ok"; puntiAssegnati = s.punti_potenziali; }
       } else if (s.tipo === "marcatore") {
-        esito = "wait"; puntiAssegnati = null;
+        if (extra.marcatore) {
+          const marcNorm = extra.marcatore.trim().toLowerCase();
+          const sceltaNorm = s.scelta.trim().toLowerCase();
+          if (marcNorm === sceltaNorm || marcNorm.includes(sceltaNorm) || sceltaNorm.includes(marcNorm)) {
+            esito = "ok"; puntiAssegnati = s.punti_potenziali;
+          } else { esito = "ko"; puntiAssegnati = s.penalita; }
+        } else { esito = "wait"; puntiAssegnati = null; }
       } else if (s.tipo === "passaggio_turno" && isPlayoff && winner) {
         if (s.scelta === winner) { esito = "ok"; puntiAssegnati = s.punti_potenziali; }
         else { esito = "ko"; puntiAssegnati = s.penalita; }
       }
+
       await supabase.from("scommesse").update({ esito, punti_assegnati: puntiAssegnati }).eq("id", s.id);
       if (esito !== "wait" && puntiAssegnati !== null) {
         await supabase.rpc("increment_punti", { p_user_id: s.user_id, p_lega_id: s.lega_id, p_delta: puntiAssegnati });
@@ -994,9 +1020,8 @@ function AdminPanel({ lega, user }) {
     if (scoreH === "" || scoreA === "") { setMsg("Inserisci entrambi i punteggi al 90\'"); return; }
     const h = parseInt(scoreH); const a = parseInt(scoreA);
     if (isNaN(h) || isNaN(a)) { setMsg("Punteggi non validi."); return; }
-    const isPlayoff = selected.fase !== "girone";
+    const isPlayoff = selected.fase && selected.fase !== "girone";
 
-    // Determina vincitore per playoff
     let winner = null;
     if (isPlayoff) {
       if (h > a) winner = selected.home_nome;
@@ -1010,27 +1035,25 @@ function AdminPanel({ lega, user }) {
           winner = hpen > apen ? selected.home_nome : selected.away_nome;
         }
       }
-      if (!winner && isPlayoff) { setMsg("Playoff: inserisci supplementari/rigori per determinare il vincitore."); return; }
+      if (!winner) { setMsg("Playoff: determina il vincitore con supplementari/rigori."); return; }
     }
 
     setSaving(true);
     try {
       const updateData = {
-        score_home_90: h, score_away_90: a, status: "closed",
-        winner: winner,
+        score_home_90: h, score_away_90: a, status: "closed", winner,
         score_home_et: hasET ? parseInt(scoreHet) : null,
         score_away_et: hasET ? parseInt(scoreAet) : null,
         score_home_pen: hasPen ? parseInt(scoreHpen) : null,
         score_away_pen: hasPen ? parseInt(scoreApen) : null,
       };
       await supabase.from("partite").update(updateData).eq("id", selected.id);
-      await calcScommesse(selected.id, h, a, winner, isPlayoff);
 
-      // Se playoff, aggiorna la partita successiva con il vincitore
+      const extra = { marcatore, cartelliniTot, primoGolFascia };
+      await calcScommesse(selected.id, h, a, winner, isPlayoff, extra);
+
       if (isPlayoff && winner && selected.next_match_id && selected.slot_next) {
-        const nextUpdate = selected.slot_next === "home"
-          ? { home_nome: winner }
-          : { away_nome: winner };
+        const nextUpdate = selected.slot_next === "home" ? { home_nome: winner } : { away_nome: winner };
         await supabase.from("partite").update(nextUpdate).eq("id", selected.next_match_id);
       }
 
@@ -1042,72 +1065,85 @@ function AdminPanel({ lega, user }) {
   };
 
   const handleGeneraOttavi = async () => {
-    // Tabellone ottavi ufficiale FIFA 2026
-    // Le prime due di ogni girone + 8 migliori terze
-    // Slot fissi FIFA: 1A-2B, 1C-2D, 1E-2F, 1G-2H, 1I-2J, 1K-2L, 1B-2A, 1D-2C...
-    // Per ora creiamo gli slot con TBD e l'admin inserisce le squadre
     const ottavi = [
-      { slot: "O1", home: "1A", away: "2B", giorno: "2026-07-04 21:00:00+02" },
-      { slot: "O2", home: "1C", away: "2D", giorno: "2026-07-04 03:00:00+02" },
-      { slot: "O3", home: "1E", away: "2F", giorno: "2026-07-05 21:00:00+02" },
-      { slot: "O4", home: "1G", away: "2H", giorno: "2026-07-05 03:00:00+02" },
-      { slot: "O5", home: "1I", away: "2J", giorno: "2026-07-06 21:00:00+02" },
-      { slot: "O6", home: "1K", away: "2L", giorno: "2026-07-06 03:00:00+02" },
-      { slot: "O7", home: "1B", away: "3ABI", giorno: "2026-07-07 21:00:00+02" },
-      { slot: "O8", home: "1D", away: "3CDJ", giorno: "2026-07-07 03:00:00+02" },
-      { slot: "O9", home: "1F", away: "3EFK", giorno: "2026-07-08 21:00:00+02" },
-      { slot: "O10", home: "1H", away: "3GHL", giorno: "2026-07-08 03:00:00+02" },
-      { slot: "O11", home: "1J", away: "3ACL", giorno: "2026-07-09 21:00:00+02" },
-      { slot: "O12", home: "1L", away: "3BDK", giorno: "2026-07-09 03:00:00+02" },
-      { slot: "O13", home: "2E", away: "3CFG", giorno: "2026-07-10 21:00:00+02" },
-      { slot: "O14", home: "2G", away: "3AEJ", giorno: "2026-07-10 03:00:00+02" },
-      { slot: "O15", home: "2I", away: "3BHI", giorno: "2026-07-11 21:00:00+02" },
-      { slot: "O16", home: "2K", away: "3DGL", giorno: "2026-07-11 03:00:00+02" },
+      { home: "1A", away: "2B", giorno: "2026-07-04 21:00:00+02" },
+      { home: "1C", away: "2D", giorno: "2026-07-04 03:00:00+02" },
+      { home: "1E", away: "2F", giorno: "2026-07-05 21:00:00+02" },
+      { home: "1G", away: "2H", giorno: "2026-07-05 03:00:00+02" },
+      { home: "1I", away: "2J", giorno: "2026-07-06 21:00:00+02" },
+      { home: "1K", away: "2L", giorno: "2026-07-06 03:00:00+02" },
+      { home: "1B", away: "T1", giorno: "2026-07-07 21:00:00+02" },
+      { home: "1D", away: "T2", giorno: "2026-07-07 03:00:00+02" },
+      { home: "1F", away: "T3", giorno: "2026-07-08 21:00:00+02" },
+      { home: "1H", away: "T4", giorno: "2026-07-08 03:00:00+02" },
+      { home: "1J", away: "T5", giorno: "2026-07-09 21:00:00+02" },
+      { home: "1L", away: "T6", giorno: "2026-07-09 03:00:00+02" },
+      { home: "2E", away: "T7", giorno: "2026-07-10 21:00:00+02" },
+      { home: "2G", away: "T8", giorno: "2026-07-10 03:00:00+02" },
+      { home: "2I", away: "2K", giorno: "2026-07-11 21:00:00+02" },
+      { home: "2C", away: "2A", giorno: "2026-07-11 03:00:00+02" },
     ];
-
     setSaving(true);
     try {
       for (const o of ottavi) {
         await supabase.from("partite").insert({
-          lega_id: lega.id,
-          girone: o.slot,
-          home_nome: o.home,
-          home_flag: "🏳️",
-          away_nome: o.away,
-          away_flag: "🏳️",
-          kickoff: o.giorno,
-          status: "open",
-          fase: "ottavi",
+          lega_id: lega.id, girone: null,
+          home_nome: o.home, home_flag: "🏳️",
+          away_nome: o.away, away_flag: "🏳️",
+          kickoff: o.giorno, status: "open", fase: "ottavi",
         });
       }
-      setMsg("✅ 16 partite degli ottavi generate! Ora aggiorna le squadre.");
+      setMsg("✅ 16 partite degli ottavi generate! Ora inserisci le migliori terze.");
       loadPartite();
-    } catch (e) { setMsg("❌ Errore nella generazione."); console.error(e); }
+    } catch (e) { setMsg("❌ Errore: " + e.message); console.error(e); }
+    finally { setSaving(false); }
+  };
+
+  const handleSalvaTerze = async () => {
+    setSaving(true);
+    try {
+      // Aggiorna gli slot T1-T8 con le squadre inserite
+      const ottaviDB = partite.filter(p => p.fase === "ottavi");
+      for (const [slot, squadra] of Object.entries(terze)) {
+        if (!squadra) continue;
+        // Trova partita con home o away == slot
+        const partita = ottaviDB.find(p => p.home_nome === slot || p.away_nome === slot);
+        if (!partita) continue;
+        const isHome = partita.home_nome === slot;
+        const flag = "🏳️";
+        await supabase.from("partite").update(
+          isHome ? { home_nome: squadra, home_flag: flag } : { away_nome: squadra, away_flag: flag }
+        ).eq("id", partita.id);
+      }
+      setMsg("✅ Migliori terze salvate!");
+      loadPartite();
+    } catch (e) { setMsg("❌ Errore: " + e.message); }
     finally { setSaving(false); }
   };
 
   if (loading) return <div style={{ padding: 20, color: "#557a62", textAlign: "center" }}>Caricamento…</div>;
 
-  const partiteGirone = partite.filter(p => p.fase === "girone" || !p.fase);
+  const partiteGirone = partite.filter(p => !p.fase || p.fase === "girone");
   const partitePlayoff = partite.filter(p => p.fase && p.fase !== "girone");
   const hasOttavi = partitePlayoff.some(p => p.fase === "ottavi");
+  const hasTerze = hasOttavi && partitePlayoff.filter(p => p.fase === "ottavi").some(p => p.home_nome?.startsWith("T") || p.away_nome?.startsWith("T"));
 
   return (
     <div style={{ padding: "14px 12px" }}>
       <div style={{ padding: "10px 14px", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, fontSize: 13, color: "#fca5a5", marginBottom: 16 }}>
-        🔐 Pannello Admin — solo tu puoi vedere questa sezione
+        🔐 Pannello Admin
       </div>
 
       {msg && <div style={{ padding: "10px 14px", background: msg.startsWith("✅") ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)", border: `1px solid ${msg.startsWith("✅") ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)"}`, borderRadius: 10, fontSize: 13, color: msg.startsWith("✅") ? "#86efac" : "#fca5a5", marginBottom: 14 }}>{msg}</div>}
 
-      {/* Tab gironi/playoff */}
+      {/* Tab */}
       <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-        {[["gironi","⚽ Gironi"],["playoff","🏆 Playoff"]].map(([val, lbl]) => (
-          <button key={val} onClick={() => setVista(val)} style={{ flex: 1, padding: "8px", borderRadius: 10, border: "none", cursor: "pointer", fontSize: 13, fontWeight: vista === val ? 700 : 400, background: vista === val ? "linear-gradient(135deg, #1a6b35, #2d8a4e)" : "rgba(255,255,255,0.05)", color: vista === val ? "#e8f5e3" : "#557a62" }}>{lbl}</button>
+        {[["gironi","⚽ Gironi"],["playoff","🏆 Playoff"],["terze","🥉 Migliori Terze"]].map(([val, lbl]) => (
+          <button key={val} onClick={() => { setVista(val); setSelected(null); setMsg(""); }} style={{ flex: 1, padding: "8px 4px", borderRadius: 10, border: "none", cursor: "pointer", fontSize: 12, fontWeight: vista === val ? 700 : 400, background: vista === val ? "linear-gradient(135deg, #1a6b35, #2d8a4e)" : "rgba(255,255,255,0.05)", color: vista === val ? "#e8f5e3" : "#557a62" }}>{lbl}</button>
         ))}
       </div>
 
-      {/* Form inserimento risultato */}
+      {/* Form risultato (comune a gironi e playoff) */}
       {selected && (
         <div style={{ background: "rgba(26,107,53,0.15)", border: "1px solid #2d6b44", borderRadius: 14, padding: 16, marginBottom: 16 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: "#e8f5e3", marginBottom: 12, textAlign: "center" }}>
@@ -1116,42 +1152,66 @@ function AdminPanel({ lega, user }) {
 
           {/* Score 90' */}
           <div style={{ fontSize: 11, color: "#6dab80", fontWeight: 600, marginBottom: 6 }}>RISULTATO AL 90'</div>
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
-            <input type="number" min="0" max="20" value={scoreH} onChange={e => setScoreH(e.target.value)} style={{ ...S.input, fontSize: 24, fontWeight: 700, textAlign: "center", padding: "10px 8px", flex: 1 }} />
-            <span style={{ color: "#557a62", fontSize: 20 }}>–</span>
-            <input type="number" min="0" max="20" value={scoreA} onChange={e => setScoreA(e.target.value)} style={{ ...S.input, fontSize: 24, fontWeight: 700, textAlign: "center", padding: "10px 8px", flex: 1 }} />
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14 }}>
+            <input type="number" min="0" max="20" value={scoreH} onChange={e => setScoreH(e.target.value)} style={{ ...S.input, fontSize: 28, fontWeight: 700, textAlign: "center", padding: "10px 4px", flex: 1 }} />
+            <span style={{ color: "#557a62", fontSize: 22 }}>–</span>
+            <input type="number" min="0" max="20" value={scoreA} onChange={e => setScoreA(e.target.value)} style={{ ...S.input, fontSize: 28, fontWeight: 700, textAlign: "center", padding: "10px 4px", flex: 1 }} />
           </div>
 
-          {/* Supplementari (solo playoff) */}
-          {selected.fase && selected.fase !== "girone" && <>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <input type="checkbox" checked={hasET} onChange={e => setHasET(e.target.checked)} id="hasET" />
-              <label htmlFor="hasET" style={{ fontSize: 13, color: "#9fc89a", cursor: "pointer" }}>Supplementari</label>
+          {/* Marcatore */}
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 11, color: "#6dab80", fontWeight: 600, marginBottom: 4 }}>👟 MARCATORE PRIMO GOL</div>
+            <input type="text" value={marcatore} onChange={e => setMarcatore(e.target.value)}
+              placeholder="Es. Mbappé (lascia vuoto se 0-0)"
+              style={{ ...S.input, fontSize: 14 }} />
+          </div>
+
+          {/* Quando si segna */}
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 11, color: "#6dab80", fontWeight: 600, marginBottom: 6 }}>⏱️ PRIMO GOL SEGNATO NELLA FASCIA</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {[["0-30","0–30'"],["31-60","31–60'"],["61-90","61–90'"],["0-0","Nessun gol (0-0)"]].map(([val, lbl]) => (
+                <button key={val} onClick={() => setPrimoGolFascia(p => p === val ? "" : val)} style={{ padding: "6px 12px", borderRadius: 20, border: "none", cursor: "pointer", fontSize: 12, background: primoGolFascia === val ? "linear-gradient(135deg, #1a6b35, #2d8a4e)" : "rgba(255,255,255,0.06)", color: primoGolFascia === val ? "#e8f5e3" : "#9fc89a" }}>{lbl}</button>
+              ))}
             </div>
-            {hasET && (
-              <>
-                <div style={{ fontSize: 11, color: "#6dab80", fontWeight: 600, marginBottom: 6 }}>RISULTATO SUPPLEMENTARI</div>
-                <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
-                  <input type="number" min="0" max="20" value={scoreHet} onChange={e => setScoreHet(e.target.value)} style={{ ...S.input, fontSize: 20, fontWeight: 700, textAlign: "center", padding: "8px", flex: 1 }} />
+          </div>
+
+          {/* Cartellini */}
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: "#6dab80", fontWeight: 600, marginBottom: 4 }}>🟨 TOTALE CARTELLINI</div>
+            <input type="number" min="0" max="20" value={cartelliniTot} onChange={e => setCartelliniTot(e.target.value)}
+              placeholder="Es. 4 (somma gialli + rossi)"
+              style={{ ...S.input, fontSize: 14 }} />
+          </div>
+
+          {/* Supplementari solo playoff */}
+          {selected.fase && selected.fase !== "girone" && <>
+            <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: 12, marginBottom: 10 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#9fc89a", cursor: "pointer" }}>
+                <input type="checkbox" checked={hasET} onChange={e => setHasET(e.target.checked)} />
+                Supplementari
+              </label>
+            </div>
+            {hasET && <>
+              <div style={{ fontSize: 11, color: "#6dab80", fontWeight: 600, marginBottom: 6 }}>RISULTATO SUPPLEMENTARI</div>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
+                <input type="number" min="0" max="20" value={scoreHet} onChange={e => setScoreHet(e.target.value)} style={{ ...S.input, fontSize: 22, fontWeight: 700, textAlign: "center", padding: "8px 4px", flex: 1 }} />
+                <span style={{ color: "#557a62" }}>–</span>
+                <input type="number" min="0" max="20" value={scoreAet} onChange={e => setScoreAet(e.target.value)} style={{ ...S.input, fontSize: 22, fontWeight: 700, textAlign: "center", padding: "8px 4px", flex: 1 }} />
+              </div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#9fc89a", cursor: "pointer", marginBottom: 10 }}>
+                <input type="checkbox" checked={hasPen} onChange={e => setHasPen(e.target.checked)} />
+                Rigori
+              </label>
+              {hasPen && <>
+                <div style={{ fontSize: 11, color: "#6dab80", fontWeight: 600, marginBottom: 6 }}>RIGORI</div>
+                <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
+                  <input type="number" min="0" max="20" value={scoreHpen} onChange={e => setScoreHpen(e.target.value)} style={{ ...S.input, fontSize: 22, fontWeight: 700, textAlign: "center", padding: "8px 4px", flex: 1 }} />
                   <span style={{ color: "#557a62" }}>–</span>
-                  <input type="number" min="0" max="20" value={scoreAet} onChange={e => setScoreAet(e.target.value)} style={{ ...S.input, fontSize: 20, fontWeight: 700, textAlign: "center", padding: "8px", flex: 1 }} />
+                  <input type="number" min="0" max="20" value={scoreApen} onChange={e => setScoreApen(e.target.value)} style={{ ...S.input, fontSize: 22, fontWeight: 700, textAlign: "center", padding: "8px 4px", flex: 1 }} />
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                  <input type="checkbox" checked={hasPen} onChange={e => setHasPen(e.target.checked)} id="hasPen" />
-                  <label htmlFor="hasPen" style={{ fontSize: 13, color: "#9fc89a", cursor: "pointer" }}>Rigori</label>
-                </div>
-                {hasPen && (
-                  <>
-                    <div style={{ fontSize: 11, color: "#6dab80", fontWeight: 600, marginBottom: 6 }}>RIGORI</div>
-                    <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12 }}>
-                      <input type="number" min="0" max="20" value={scoreHpen} onChange={e => setScoreHpen(e.target.value)} style={{ ...S.input, fontSize: 20, fontWeight: 700, textAlign: "center", padding: "8px", flex: 1 }} />
-                      <span style={{ color: "#557a62" }}>–</span>
-                      <input type="number" min="0" max="20" value={scoreApen} onChange={e => setScoreApen(e.target.value)} style={{ ...S.input, fontSize: 20, fontWeight: 700, textAlign: "center", padding: "8px", flex: 1 }} />
-                    </div>
-                  </>
-                )}
-              </>
-            )}
+              </>}
+            </>}
           </>}
 
           <div style={{ display: "flex", gap: 8 }}>
@@ -1162,10 +1222,13 @@ function AdminPanel({ lega, user }) {
       )}
 
       {/* VISTA GIRONI */}
-      {vista === "gironi" && <>
+      {vista === "gironi" && !selected && <>
         <div style={{ fontSize: 12, color: "#557a62", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 8 }}>Da aggiornare</div>
+        {partiteGirone.filter(p => p.status !== "closed").length === 0 && (
+          <div style={{ textAlign: "center", color: "#557a62", padding: 16, fontSize: 13 }}>Tutte le partite sono state aggiornate ✅</div>
+        )}
         {partiteGirone.filter(p => p.status !== "closed").map(p => (
-          <button key={p.id} onClick={() => handleSelect(p)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", background: selected?.id === p.id ? "rgba(26,107,53,0.2)" : "rgba(255,255,255,0.03)", border: `1px solid ${selected?.id === p.id ? "#2d6b44" : "rgba(255,255,255,0.08)"}`, borderRadius: 10, marginBottom: 6, cursor: "pointer", color: "#e8f5e3" }}>
+          <button key={p.id} onClick={() => handleSelect(p)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, marginBottom: 6, cursor: "pointer", color: "#e8f5e3" }}>
             <span style={{ fontSize: 13 }}>{p.home_flag} {p.home_nome} vs {p.away_nome} {p.away_flag}</span>
             <span style={{ fontSize: 11, color: "#557a62" }}>G{p.girone}</span>
           </button>
@@ -1182,37 +1245,36 @@ function AdminPanel({ lega, user }) {
       </>}
 
       {/* VISTA PLAYOFF */}
-      {vista === "playoff" && <>
-        {!hasOttavi && (
+      {vista === "playoff" && !selected && <>
+        {!hasOttavi ? (
           <div style={{ textAlign: "center", padding: 20 }}>
             <div style={{ fontSize: 32, marginBottom: 12 }}>🏆</div>
-            <div style={{ fontSize: 14, color: "#9fc89a", marginBottom: 8 }}>I gironi sono finiti?</div>
-            <div style={{ fontSize: 12, color: "#557a62", marginBottom: 20 }}>Genera le 16 partite degli ottavi quando tutti i gironi sono completati.</div>
+            <div style={{ fontSize: 14, color: "#9fc89a", marginBottom: 8 }}>Gironi completati?</div>
+            <div style={{ fontSize: 12, color: "#557a62", marginBottom: 20 }}>Genera le 16 partite degli ottavi quando tutti i gironi sono terminati.</div>
             <button onClick={handleGeneraOttavi} disabled={saving} style={{ ...S.primaryBtn, opacity: saving ? 0.7 : 1 }}>
               {saving ? "Generazione…" : "Genera ottavi di finale"}
             </button>
           </div>
-        )}
-        {hasOttavi && <>
+        ) : <>
           {["ottavi","quarti","semifinale","finale","terzo_posto"].map(fase => {
             const fp = partitePlayoff.filter(p => p.fase === fase);
             if (fp.length === 0) return null;
             const faseLabel = { ottavi: "Ottavi", quarti: "Quarti", semifinale: "Semifinali", finale: "Finale", terzo_posto: "3°/4° posto" }[fase];
             return (
               <div key={fase} style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 12, color: "#557a62", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 8 }}>{faseLabel}</div>
+                <div style={{ fontSize: 12, color: "#557a62", textTransform: "uppercase", marginBottom: 8 }}>{faseLabel}</div>
                 {fp.map(p => (
                   p.status === "closed" ? (
                     <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", background: "rgba(34,197,94,0.05)", border: "1px solid rgba(34,197,94,0.1)", borderRadius: 10, marginBottom: 6 }}>
-                      <span style={{ fontSize: 13, color: "#9fc89a" }}>{p.home_flag} {p.home_nome} vs {p.away_nome} {p.away_flag}</span>
+                      <span style={{ fontSize: 13, color: "#9fc89a" }}>{p.home_nome} vs {p.away_nome}</span>
                       <div style={{ textAlign: "right" }}>
                         <div style={{ fontSize: 14, fontWeight: 700, color: "#b8f0c8" }}>{p.score_home_90}–{p.score_away_90}</div>
                         {p.winner && <div style={{ fontSize: 11, color: "#6dab80" }}>✓ {p.winner}</div>}
                       </div>
                     </div>
                   ) : (
-                    <button key={p.id} onClick={() => handleSelect(p)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", background: selected?.id === p.id ? "rgba(26,107,53,0.2)" : "rgba(255,255,255,0.03)", border: `1px solid ${selected?.id === p.id ? "#2d6b44" : "rgba(255,255,255,0.08)"}`, borderRadius: 10, marginBottom: 6, cursor: "pointer", color: "#e8f5e3" }}>
-                      <span style={{ fontSize: 13 }}>{p.home_flag} {p.home_nome} vs {p.away_nome} {p.away_flag}</span>
+                    <button key={p.id} onClick={() => handleSelect(p)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 12px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, marginBottom: 6, cursor: "pointer", color: "#e8f5e3" }}>
+                      <span style={{ fontSize: 13 }}>{p.home_nome} vs {p.away_nome}</span>
                       <span style={{ fontSize: 11, color: "#f59e0b" }}>● Aperta</span>
                     </button>
                   )
@@ -1222,204 +1284,41 @@ function AdminPanel({ lega, user }) {
           })}
         </>}
       </>}
-    </div>
-  );
-}
 
-
-
-// ─── PLAYOFF ─────────────────────────────────────────────────────────────────
-function Playoff({ lega, user }) {
-  const [partite, setPartite] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState(null);
-  const [bets, setBets] = useState({});
-  const [confirmed, setConfirmed] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [myScommesse, setMyScommesse] = useState({});
-
-  useEffect(() => {
-    if (!lega?.id) return;
-    supabase.from("partite").select("*")
-      .eq("lega_id", lega.id)
-      .in("fase", ["ottavi","quarti","semifinale","finale","terzo_posto"])
-      .order("kickoff", { ascending: true })
-      .then(({ data }) => { setPartite(data || []); setLoading(false); });
-  }, [lega?.id]);
-
-  const loadScommesse = async (partitaId) => {
-    const { data } = await supabase.from("scommesse")
-      .select("tipo,scelta,esito,punti_assegnati,punti_potenziali")
-      .eq("partita_id", partitaId)
-      .eq("user_id", user.id);
-    if (data && data.length > 0) {
-      setMyScommesse(prev => ({ ...prev, [partitaId]: data }));
-      setConfirmed(true);
-    }
-  };
-
-  const handleSelect = async (p) => {
-    setSelected(p);
-    setBets({});
-    setConfirmed(false);
-    await loadScommesse(p.id);
-  };
-
-  const handleConfirm = async () => {
-    if (!selected || Object.keys(bets).length === 0) return;
-    setSaving(true);
-    try {
-      const toInsert = Object.entries(bets).map(([tipo, scelta]) => {
-        const pts = tipo === "passaggio_turno" ? 8 : tipo === "1x2" ? 3 : tipo === "ou" ? 4 : tipo === "risultato" ? 10 : tipo === "cleansheet" ? 5 : tipo === "marcatore" ? 15 : 5;
-        const pen = tipo === "passaggio_turno" ? -3 : tipo === "risultato" ? -3 : tipo === "marcatore" ? -3 : -2;
-        return { partita_id: selected.id, user_id: user.id, lega_id: lega.id, tipo, scelta, punti_potenziali: pts, penalita: pen, esito: "wait" };
-      });
-      await supabase.from("scommesse").upsert(toInsert, { onConflict: "partita_id,user_id,tipo" });
-      setMyScommesse(prev => ({ ...prev, [selected.id]: toInsert }));
-      setConfirmed(true);
-    } catch (e) { console.error(e); }
-    finally { setSaving(false); }
-  };
-
-  if (loading) return <div style={{ padding: 20, color: "#557a62", textAlign: "center" }}>Caricamento…</div>;
-
-  if (partite.length === 0) return (
-    <div style={{ padding: 24, textAlign: "center", color: "#557a62" }}>
-      <div style={{ fontSize: 40, marginBottom: 12 }}>🏆</div>
-      <div style={{ fontSize: 14, color: "#9fc89a", marginBottom: 8 }}>I playoff iniziano dopo i gironi.</div>
-      <div style={{ fontSize: 12 }}>Le partite appariranno qui automaticamente.</div>
-    </div>
-  );
-
-  const fasi = ["ottavi","quarti","semifinale","finale","terzo_posto"];
-  const faseLabel = { ottavi: "Ottavi di Finale", quarti: "Quarti di Finale", semifinale: "Semifinali", finale: "🏆 Finale", terzo_posto: "3°/4° Posto" };
-
-  return (
-    <div style={{ padding: "14px 12px" }}>
-      {fasi.map(fase => {
-        const fp = partite.filter(p => p.fase === fase);
-        if (fp.length === 0) return null;
-        return (
-          <div key={fase} style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#6dab80", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.5px" }}>
-              {faseLabel[fase]}
-            </div>
-            {fp.map(p => {
-              const isClosed = p.status === "closed";
-              const isSelected = selected?.id === p.id;
-              const mySc = myScommesse[p.id] || [];
-              const now = new Date();
-              const isPast = now > new Date(p.kickoff);
-
-              return (
-                <div key={p.id} style={{ background: isClosed ? "rgba(255,255,255,0.02)" : "rgba(255,255,255,0.04)", border: `1px solid ${isClosed ? "rgba(255,255,255,0.05)" : isSelected ? "#2d8a4e" : "rgba(255,255,255,0.1)"}`, borderRadius: 14, marginBottom: 10, overflow: "hidden", opacity: isClosed ? 0.75 : 1 }}>
-                  {/* Header */}
-                  <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 12px", background: "rgba(255,255,255,0.02)", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-                    <span style={{ fontSize: 11, color: "#557a62" }}>{formatKickoff(p.kickoff)}</span>
-                    <span style={{ fontSize: 11, color: isClosed ? "#557a62" : "#f59e0b", fontWeight: 600 }}>
-                      {isClosed ? "● Chiusa" : "● Aperta"}
-                    </span>
-                  </div>
-
-                  {/* Squadre */}
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px" }}>
-                    <div style={{ textAlign: "center", flex: 1 }}>
-                      <div style={{ fontSize: 28 }}>{p.home_flag}</div>
-                      <div style={{ fontSize: 12, color: "#9fc89a", marginTop: 4 }}>{p.home_nome}</div>
-                    </div>
-                    {isClosed ? (
-                      <div style={{ textAlign: "center" }}>
-                        <div style={{ fontSize: 22, fontWeight: 700, color: "#e8f5e3" }}>{p.score_home_90}–{p.score_away_90}</div>
-                        {p.score_home_et !== null && <div style={{ fontSize: 11, color: "#557a62" }}>d.t.s. {p.score_home_et}–{p.score_away_et}</div>}
-                        {p.score_home_pen !== null && <div style={{ fontSize: 11, color: "#557a62" }}>rig. {p.score_home_pen}–{p.score_away_pen}</div>}
-                        {p.winner && <div style={{ fontSize: 12, color: "#22c55e", marginTop: 4, fontWeight: 600 }}>✓ {p.winner}</div>}
-                      </div>
-                    ) : (
-                      <div style={{ fontSize: 14, color: "#557a62" }}>vs</div>
-                    )}
-                    <div style={{ textAlign: "center", flex: 1 }}>
-                      <div style={{ fontSize: 28 }}>{p.away_flag}</div>
-                      <div style={{ fontSize: 12, color: "#9fc89a", marginTop: 4 }}>{p.away_nome}</div>
-                    </div>
-                  </div>
-
-                  {/* Scommesse */}
-                  {!isClosed && !isPast && (
-                    <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", padding: "12px 14px" }}>
-                      {!isSelected && mySc.length === 0 && (
-                        <button onClick={() => handleSelect(p)} style={{ width: "100%", padding: "8px", background: "rgba(45,138,78,0.15)", border: "1px solid #2d6b44", borderRadius: 10, color: "#6dab80", fontSize: 13, cursor: "pointer" }}>
-                          + Piazza scommesse
-                        </button>
-                      )}
-                      {isSelected && !confirmed && (
-                        <>
-                          {/* 1X2 */}
-                          <div style={{ marginBottom: 10 }}>
-                            <div style={{ fontSize: 12, color: "#9fc89a", marginBottom: 5 }}>⚽ 1X2 al 90' (+3/-2)</div>
-                            <div style={{ display: "flex", gap: 5 }}>
-                              {[{val:"home",lbl:"1"},{val:"x",lbl:"X"},{val:"away",lbl:"2"}].map(o => (
-                                <button key={o.val} onClick={() => setBets(b => ({...b, "1x2": b["1x2"]===o.val ? undefined : o.val}))} style={{ flex:1, padding:"6px", borderRadius:8, border:"none", cursor:"pointer", background: bets["1x2"]===o.val ? "linear-gradient(135deg,#1a6b35,#2d8a4e)" : "rgba(255,255,255,0.06)", color: bets["1x2"]===o.val ? "#e8f5e3":"#9fc89a", fontSize:13, fontWeight:600 }}>{o.lbl}</button>
-                              ))}
-                            </div>
-                          </div>
-                          {/* Over/Under */}
-                          <div style={{ marginBottom: 10 }}>
-                            <div style={{ fontSize: 12, color: "#9fc89a", marginBottom: 5 }}>🎯 Over/Under 2.5 (+4/-2)</div>
-                            <div style={{ display: "flex", gap: 5 }}>
-                              {[{val:"under",lbl:"Under"},{val:"over",lbl:"Over"}].map(o => (
-                                <button key={o.val} onClick={() => setBets(b => ({...b, "ou": b["ou"]===o.val ? undefined : o.val}))} style={{ flex:1, padding:"6px", borderRadius:8, border:"none", cursor:"pointer", background: bets["ou"]===o.val ? "linear-gradient(135deg,#1a6b35,#2d8a4e)" : "rgba(255,255,255,0.06)", color: bets["ou"]===o.val ? "#e8f5e3":"#9fc89a", fontSize:13, fontWeight:600 }}>{o.lbl}</button>
-                              ))}
-                            </div>
-                          </div>
-                          {/* Passaggio turno */}
-                          <div style={{ marginBottom: 10 }}>
-                            <div style={{ fontSize: 12, color: "#fbbf24", marginBottom: 5 }}>🏆 Chi passa il turno? (+8/-3)</div>
-                            <div style={{ display: "flex", gap: 5 }}>
-                              {[{val:p.home_nome,lbl:p.home_nome},{val:p.away_nome,lbl:p.away_nome}].map(o => (
-                                <button key={o.val} onClick={() => setBets(b => ({...b, "passaggio_turno": b["passaggio_turno"]===o.val ? undefined : o.val}))} style={{ flex:1, padding:"6px", borderRadius:8, border:"none", cursor:"pointer", background: bets["passaggio_turno"]===o.val ? "linear-gradient(135deg,#92400e,#b45309)" : "rgba(255,255,255,0.06)", color: bets["passaggio_turno"]===o.val ? "#fef3c7":"#9fc89a", fontSize:12 }}>{o.lbl}</button>
-                              ))}
-                            </div>
-                          </div>
-                          <button onClick={handleConfirm} disabled={saving || Object.keys(bets).filter(k=>bets[k]).length===0} style={{ width:"100%", padding:"9px", background:"linear-gradient(135deg,#1a6b35,#2d8a4e)", color:"#e8f5e3", border:"none", borderRadius:10, fontSize:13, fontWeight:700, cursor:"pointer", opacity: saving?0.7:1 }}>
-                            {saving ? "Salvataggio…" : "Conferma scommesse"}
-                          </button>
-                        </>
-                      )}
-                      {mySc.length > 0 && confirmed && (
-                        <>
-                          <div style={{ fontSize: 11, color: "#557a62", marginBottom: 8 }}>Le tue scommesse:</div>
-                          {mySc.map((s, i) => (
-                            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                              <span style={{ fontSize: 12, color: "#9fc89a", minWidth: 80 }}>{s.tipo}</span>
-                              <span style={{ padding: "3px 10px", fontSize: 12, borderRadius: 20, background: s.esito==="ok"?"rgba(34,197,94,0.15)":s.esito==="ko"?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.06)", color: esitoColor(s.esito) }}>{s.scelta}</span>
-                              <span style={{ marginLeft:"auto", fontSize:13, fontWeight:700, color:esitoColor(s.esito) }}>
-                                {s.esito==="wait"?`+${s.punti_potenziali}?`:s.punti_assegnati>0?`+${s.punti_assegnati}`:s.punti_assegnati}
-                              </span>
-                            </div>
-                          ))}
-                        </>
-                      )}
-                    </div>
-                  )}
-                  {isClosed && mySc.length > 0 && (
-                    <div style={{ borderTop: "1px solid rgba(255,255,255,0.05)", padding: "8px 14px" }}>
-                      {mySc.map((s, i) => (
-                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                          <span style={{ fontSize: 11, color: "#557a62", minWidth: 80 }}>{s.tipo}</span>
-                          <span style={{ fontSize: 11, color: esitoColor(s.esito) }}>{s.scelta}</span>
-                          <span style={{ marginLeft:"auto", fontSize:12, fontWeight:700, color:esitoColor(s.esito) }}>
-                            {s.esito==="wait"?"…":s.punti_assegnati>0?`+${s.punti_assegnati}`:s.punti_assegnati}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+      {/* VISTA MIGLIORI TERZE */}
+      {vista === "terze" && <>
+        {!hasOttavi ? (
+          <div style={{ textAlign: "center", padding: 20, color: "#557a62", fontSize: 13 }}>
+            Genera prima gli ottavi di finale dalla tab Playoff.
           </div>
-        );
-      })}
+        ) : !hasTerze ? (
+          <div style={{ textAlign: "center", padding: 20, color: "#557a62", fontSize: 13 }}>
+            Gli slot delle migliori terze sono già stati compilati.
+          </div>
+        ) : <>
+          <div style={{ fontSize: 13, color: "#9fc89a", marginBottom: 4 }}>Inserisci le 8 migliori terze classificate</div>
+          <div style={{ fontSize: 12, color: "#557a62", marginBottom: 16, lineHeight: 1.6 }}>
+            Dopo i gironi, inserisci le 8 migliori terze nei loro slot. Gli slot sono T1–T8 nel tabellone degli ottavi.
+          </div>
+          {["T1","T2","T3","T4","T5","T6","T7","T8"].map((slot, i) => (
+            <div key={slot} style={{ marginBottom: 10 }}>
+              <label style={{ fontSize: 11, color: "#6dab80", display: "block", marginBottom: 4, fontWeight: 600 }}>
+                {slot} — {i + 1}ª migliore terza
+              </label>
+              <SquadraDropdown
+                value={terze[slot] || ""}
+                onChange={v => setTerze(prev => ({ ...prev, [slot]: v }))}
+                placeholder="-- Seleziona squadra --"
+              />
+            </div>
+          ))}
+          <div style={{ marginTop: 16 }}>
+            <button onClick={handleSalvaTerze} disabled={saving} style={{ ...S.primaryBtn, opacity: saving ? 0.7 : 1 }}>
+              {saving ? "Salvataggio…" : "Salva migliori terze"}
+            </button>
+          </div>
+        </>}
+      </>}
     </div>
   );
 }
